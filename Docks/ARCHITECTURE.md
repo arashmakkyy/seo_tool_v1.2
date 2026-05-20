@@ -10,9 +10,9 @@ db.version(2).stores({
   projects : '++id, name, created_at',
   pages    : '++id, project_id, title',
   weights  : '++id, project_id, category_name',
-  candidates: '++id, project_id, source_page_id', // جدول جدید: لیست ۲۰ کاندیدا
+  candidates: '++id, project_id, source_page_id',
   results  : '++id, project_id, source_page_id',
-  analysisQueue: '++id, project_id' // صف پردازش AI
+  analysisQueue: '++id, project_id'
 })
 ```
 
@@ -23,8 +23,6 @@ db.version(2).stores({
 | name | string | نام پروژه — مثلاً «نهال‌گشت ۱۴۰۵» |
 | created_at | ISO string | تاریخ ساخت |
 | scoring_mode | `'linear'` یا `'weighted'` | روش امتیازدهی |
-
-> **نکته:** فیلد `max_links` حذف شده. AI تمام لینک‌های مرتبط از بین ۲۰ کاندیدا را انتخاب می‌کند — بدون محدودیت عددی.
 
 ### جدول `pages`
 | فیلد | نوع | توضیح |
@@ -66,19 +64,19 @@ db.version(2).stores({
 | category_name | string | نام ستون دسته‌بندی |
 | weight_value | float (1-5) | وزن اختصاص‌داده‌شده |
 
-**وزن‌های پیش‌فرض:**
+**وزن‌های پیش‌فرض (بازنگری شده):**
 ```ts
 {
-  'شهر_یا_جزیره_مقصد'   : 5,
+  'شهر_یا_استان_مبدا'   : 6, // ⬆️ افزایش — مبدا اولویت اول
+  'شهر_یا_جزیره_مقصد'   : 5, // مقصد اولویت دوم
   'کشور_مقصد'           : 4,
+  'ماه_تقویمی_برگزاری'  : 4, // ⬆️ افزایش — زمان مهم است
+  'فصل_برگزاری'         : 4, // ⬆️ افزایش — فصل مهم است
   'نوع_تور'             : 3,
-  'ماه_تقویمی_برگزاری'  : 3,
-  'فصل_برگزاری'         : 3,
   'قاره_یا_منطقه'       : 2,
   'جهت_در_منطقه'        : 2,
   'تم_یا_هدف_سفر'       : 2,
   'نوع_سفر'             : 2,
-  'شهر_یا_استان_مبدا'   : 1,
   'تعطیلات_خاص_تقویمی'  : 1,
   'رویداد_یا_مناسبت_خاص': 1,
   'نوع_وسیله_نقلیه'     : 1,
@@ -90,19 +88,26 @@ db.version(2).stores({
 }
 ```
 
-### جدول `candidates` (جدید — لیست ۲۰ کاندیدای هر صفحه)
+### جدول `candidates` (لیست کاندیدای هر صفحه)
 | فیلد | نوع | توضیح |
 |---|---|---|
 | id | auto int PK | |
 | project_id | int FK → projects.id | |
 | source_page_id | int FK → pages.id | صفحه‌ای که کاندیداها برایش محاسبه شده |
-| candidate_list | JSON string | آرایه ۲۰ کاندیدا (بدون AI) |
+| candidate_list | JSON string | آرایه کاندیداها (بعد از فیلتر زمانی) |
 | computed_at | ISO string | زمان محاسبه |
 
 **ساختار `candidate_list`:**
 ```json
 [
-  { "page_id": 42, "title": "تور مارماریس تابستان", "score": 15, "matched_tags": ["کشور_مقصد", "فصل_برگزاری"] }
+  { 
+    "page_id": 42, 
+    "title": "تور مارماریس تابستان", 
+    "score": 15, 
+    "matched_tags": ["کشور_مقصد", "فصل_برگزاری"],
+    "origin_bonus": 5,
+    "destination_bonus": 0
+  }
 ]
 ```
 
@@ -116,28 +121,16 @@ db.version(2).stores({
 | is_manual_edit | boolean | آیا کاربر دستی ویرایش کرده؟ |
 | generated_at | ISO string | زمان تولید |
 
-**ساختار `recommended_links`:**
-```json
-[
-  {
-    "page_id": 42,
-    "title": "تور مارماریس تابستان ۱۴۰۵",
-    "score": 11,
-    "reason": "هر دو تور ترکیه مدیترانه تابستانه هستند",
-    "is_manual": false
-  }
-]
-```
-
 ### جدول `analysisQueue` (صف پردازش AI)
 | فیلد | نوع | توضیح |
 |---|---|---|
 | id | auto int PK | |
 | project_id | int FK → projects.id | |
-| status | `'pending'` / `'processing'` / `'completed'` / `'failed'` | وضعیت صف |
+| status | `'pending'` / `'processing'` / `'completed'` / `'failed'` / `'paused'` | وضعیت صف |
 | current_page_index | int | ایندکس آخرین صفحه پردازش‌شده |
 | total_pages | int | تعداد کل صفحات |
 | error_message | string / null | پیام خطا اگر fail شد |
+| selected_model | string | مدل AI انتخاب شده |
 | started_at | ISO string | زمان شروع |
 | updated_at | ISO string | آخرین به‌روزرسانی |
 
@@ -160,27 +153,29 @@ Dexie: projects.add() + pages.bulkAdd()
     │
     ▼
 Config Screen: scoring_mode + weights → Dexie: weights.bulkAdd()
+    │                                                
+    │  ⚠️ نکته مهم: هر تغییر در Config باید:
+    │  1. جدول candidates را پاک کند
+    │  2. محاسبه مجدد امتیازدهی را تریگر کند
     │
-    ├───────────────────────────────────────────────────────────────────┐
-    │                                                                   │
-    ▼                                                                   ▼
-[مرحله اول: امتیازدهی داخلی - بدون AI]                    [صفحه لیست صفحات]
-    │                                                                   │
-    ▼                                                                   ▼
-scorer.ts → computeAllCandidates()                         کلیک روی هر صفحه
-    │                                                                   │
-    ▼                                                                   ▼
-برای هر صفحه: top 20 کاندیدا                              [صفحه جزئیات صفحه]
-    │                                                         /         \
-    ▼                                                        /           \
-Dexie: candidates.bulkAdd()                                 ▼             ▼
-    │                                                   [دکمه تکی    [ویرایش
-    │                                                    بررسی AI]    دستی]
-    └───────────────────────────────────────────────────────┘
-                                                            │
-                                                            ▼
-                          ┌─────────────────────────────────────────────────────────────┐
-                          │              مرحله دوم: پردازش AI                            │
+    ▼
+[مرحله اول: امتیازدهی داخلی - بدون AI]
+    │
+    ▼
+scorer.ts → computeAllCandidates()
+    │
+    ├── فیلتر فصلی/زمانی (حذف صفحات نامرتبط زمانی)
+    ├── محاسبه امتیاز پایه (وزن تگ‌های مشترک)
+    ├── بونوس مبدا (origin_bonus)
+    └── بونوس مقصد (destination_bonus)
+    │
+    ▼
+Dexie: candidates.bulkAdd()
+    │
+    └───────────────────────────────────────────────────────────────────┐
+                                                                        │
+                          ┌─────────────────────────────────────────────▼─────────────┐
+                          │              مرحله دوم: پردازش AI                          │
                           └─────────────────────────────────────────────────────────────┘
 
                     ┌───────────────────┐         ┌───────────────────┐
@@ -190,28 +185,166 @@ Dexie: candidates.bulkAdd()                                 ▼             ▼
                              │                             │
                              ▼                             ▼
                     فقط همان صفحه +               ایجاد analysisQueue
-                    ۲۰ کاندیدایش                  با status='pending'
+                    کاندیداهایش                   با status='pending'
                              │                             │
                              ▼                             ▼
-                    gemini.ts: buildSinglePrompt()     صف‌پردازی:
-                             │                      ┌──────────────────────────┐
-                             ▼                      │  برای هر صفحه:          │
-                    callGemini()                    │  1. صفحه i را بگیر       │
-                             │                      │  2. ۲۰ کاندیدا بفرست    │
-                             ▼                      │  3. جواب بگیر            │
-                    ذخیره در results                │  4. ذخیره در results     │
-                             │                      │  5. مکث ۲ ثانیه          │
-                             ▼                      │  6. update queue index   │
-                    نمایش نتیجه                     │  7. تکرار تا آخر         │
-                                                    └──────────────────────────┘
-                                                               │
-                                                               ▼
-                                                    اگر خطا یا قطع شد:
-                                                    queue.status = 'failed'
-                                                    queue.error_message = ...
-                                                               │
-                                                               ▼
-                                                    دفعه بعد: از current_page_index ادامه بده
+                    gemini.ts:                       صف‌پردازی:
+                    buildSinglePagePrompt()     ┌──────────────────────────┐
+                    (با پرامپت جدید که          │  برای هر صفحه:          │
+                    نیت کاربر را درک کند)       │  1. صفحه i را بگیر       │
+                             │                   │  2. کاندیداها بفرست     │
+                             ▼                   │  3. جواب بگیر            │
+                    callGemini()                │  4. ذخیره در results     │
+                             │                   │  5. مکث ۲ ثانیه          │
+                             ▼                   │  6. update queue index   │
+                    ذخیره در results            │  7. تکرار تا آخر         │
+                                                 └──────────────────────────┘
+```
+
+---
+
+## منطق الگوریتم امتیازدهی (`scorer.ts`) — تغییرات جدید
+
+### ۱. ترتیب ماه‌های شمسی (برای فیلتر زمانی)
+```ts
+const PERSIAN_MONTHS_ORDER = [
+  'فروردین', 'اردیبهشت', 'خرداد',
+  'تیر', 'مرداد', 'شهریور',
+  'مهر', 'آبان', 'آذر',
+  'دی', 'بهمن', 'اسفند'
+];
+```
+
+### ۲. تابع جدید `isValidSeasonalMatch` (فیلتر Hard)
+```ts
+// بررسی می‌کند آیا کاندیدا از نظر زمانی مجاز است یا خیر
+function isValidSeasonalMatch(sourceCategories: any, candidateCategories: any): boolean {
+  const sourceMonth = sourceCategories['ماه_تقویمی_برگزاری'];
+  const sourceSeason = sourceCategories['فصل_برگزاری'];
+  const candidateMonth = candidateCategories['ماه_تقویمی_برگزاری'];
+  const candidateSeason = candidateCategories['فصل_برگزاری'];
+  
+  // اگر منبع ماه خاصی ندارد، همه مجاز هستند
+  if (!sourceMonth && !sourceSeason) return true;
+  
+  // اگر منبع ماه دارد، کاندیدا باید همان ماه یا ماه بعدی باشد
+  if (sourceMonth && candidateMonth) {
+    const sourceIdx = PERSIAN_MONTHS_ORDER.indexOf(sourceMonth);
+    const candidateIdx = PERSIAN_MONTHS_ORDER.indexOf(candidateMonth);
+    // ماه همان یا یکی بعد (با چرخش سال)
+    const isValid = candidateIdx === sourceIdx || 
+                    candidateIdx === (sourceIdx + 1) % 12;
+    if (!isValid) return false;
+  }
+  
+  // اگر منبع فصل دارد، کاندیدا باید همان فصل باشد
+  if (sourceSeason && candidateSeason && sourceSeason !== candidateSeason) {
+    return false;
+  }
+  
+  return true;
+}
+```
+
+### ۳. تابع جدید `calculateBonuses` (بونوس مبدا/مقصد)
+```ts
+function calculateBonuses(sourceCategories: any, candidateCategories: any): { originBonus: number, destinationBonus: number } {
+  let originBonus = 0;
+  let destinationBonus = 0;
+  
+  // بونوس مبدا — اولویت اول
+  if (sourceCategories['شهر_یا_استان_مبدا'] && 
+      sourceCategories['شهر_یا_استان_مبدا'] === candidateCategories['شهر_یا_استان_مبدا']) {
+    originBonus = 10; // بونوس قابل توجه
+  }
+  
+  // بونوس مقصد — اولویت دوم
+  if (sourceCategories['شهر_یا_جزیره_مقصد'] && 
+      sourceCategories['شهر_یا_جزیره_مقصد'] === candidateCategories['شهر_یا_جزیره_مقصد']) {
+    destinationBonus = 5;
+  }
+  
+  return { originBonus, destinationBonus };
+}
+```
+
+### ۴. تغییر در `findTopCandidates` — منطق چندلایه
+```ts
+export function findTopCandidates(sourcePage: any, allPages: any[], weights: Record<string, number>, mode: 'linear' | 'weighted'): CandidateWithTags[] {
+  const sourceCat = JSON.parse(sourcePage.categories);
+  
+  return allPages
+    .filter(p => p.id !== sourcePage.id)
+    .map(p => {
+      const pCat = JSON.parse(p.categories);
+      
+      // لایه ۱: فیلتر Hard فصلی/زمانی
+      if (!isValidSeasonalMatch(sourceCat, pCat)) {
+        return null; // حذف کامل
+      }
+      
+      // لایه ۲: امتیاز پایه
+      const baseScore = computeScore(sourceCat, pCat, weights, mode);
+      
+      // لایه ۳: بونوس‌ها
+      const { originBonus, destinationBonus } = calculateBonuses(sourceCat, pCat);
+      
+      // امتیاز نهایی = پایه + بونوس (نه میانگین!)
+      const totalScore = baseScore + originBonus + destinationBonus;
+      
+      return {
+        page_id: p.id!,
+        title: p.title,
+        score: totalScore,
+        matched_tags: getMatchedTags(sourceCat, pCat),
+        origin_bonus: originBonus,
+        destination_bonus: destinationBonus
+      };
+    })
+    .filter(c => c !== null && c.score > 0)
+    .sort((a, b) => b!.score - a!.score);
+}
+```
+
+---
+
+## ساختار پرامپت بهبودیافته برای Gemini
+
+```
+SYSTEM:
+تو یک متخصص SEO و معمار لینک‌سازی داخلی برای سایت تور مسافرتی هستی.
+
+مهم‌ترین وظیفه تو: **درک نیت کاربر** از بازدید صفحه منبع.
+
+قبل از انتخاب لینک‌ها، باید به این سوالات پاسخ دهی:
+1. عنوان صفحه چیست و کاربر چرا به این صفحه آمده؟
+2. بازه سفر کاربر چه زمانی است؟ (اگر صفحه مربوط به تیرماه است، کاربر احتمالاً برای تابستان برنامه دارد)
+3. دغدغه کاربر چیست؟ (قیمت؟ مقصد؟ زمان؟ نوع تور؟)
+4. کدام صفحات می‌توانند سفر کاربر در سایت را تکمیل کنند؟
+
+قوانین انتخاب لینک:
+1. **قانون زمانی:** اگر صفحه منبع ماه خاصی دارد، فقط صفحات همان ماه یا ماه بعدی مجاز هستند. صفحات فصل‌های دیگر را انتخاب نکن.
+2. **قانون مبدا:** صفحات با مبدای یکسان اولویت اول هستند.
+3. **قانون مقصد:** صفحات با مقصد یکسان اولویت دوم هستند.
+4. **قانون تکمیل‌کنندگی:** صفحاتی که اطلاعات مکمل (نه تکراری) ارائه می‌دهند.
+
+USER:
+صفحه اصلی:
+- عنوان: ${sourcePage.title}
+- ویژگی‌ها: ${JSON.stringify(sourcePage.categories)}
+
+کاندیداها (پیش‌فیلتر شده بر اساس زمان و مرتب بر اساس امتیاز):
+${candidates.map((c, i) => `${i + 1}. [ID: ${c.page_id}] ${c.title}
+   امتیاز: ${c.score} | بونوس مبدا: ${c.origin_bonus} | بونوس مقصد: ${c.destination_bonus}
+   تگ‌های مشترک: ${c.matched_tags.join(', ')}`).join('\n\n')}
+
+خروجی را فقط به صورت JSON خالص بده:
+{
+  "user_intent": "توضیح کوتاه نیت کاربر",
+  "selected_links": [
+    { "page_id": 42, "title": "...", "reason": "..." }
+  ]
+}
 ```
 
 ---
@@ -223,100 +356,9 @@ Dexie: candidates.bulkAdd()                                 ▼             ▼
 | `/` | `Home.tsx` | لیست پروژه‌ها |
 | `/new` | `NewProject.tsx` | آپلود CSV |
 | `/config/:projectId` | `Config.tsx` | تنظیمات امتیازدهی |
-| `/project/:projectId` | `ProjectPages.tsx` | **جدید:** لیست صفحات پروژه + دکمه تحلیل کلی |
-| `/project/:projectId/page/:pageId` | `PageDetail.tsx` | **جدید:** جزئیات یک صفحه + ویرایش دستی |
+| `/project/:projectId` | `ProjectPages.tsx` | لیست صفحات پروژه + دکمه تحلیل کلی |
+| `/project/:projectId/page/:pageId` | `PageDetail.tsx` | جزئیات یک صفحه + ویرایش دستی |
 | `/results/:projectId` | `Results.tsx` | خروجی نهایی + export |
-
----
-
-## درخت فایل (تغییرات جدید)
-
-فایل‌های جدید که باید ساخته شوند:
-```
-src/
-├── pages/
-│   ├── ProjectPages.tsx     ← [جدید] لیست صفحات + دکمه تحلیل کلی
-│   └── PageDetail.tsx       ← [جدید] جزئیات صفحه + ویرایش دستی
-│
-├── utils/
-│   ├── scorer.ts            ← [ویرایش] اضافه کردن matched_tags به خروجی
-│   └── gemini.ts            ← [ویرایش] اضافه کردن buildSinglePrompt()
-│
-├── components/
-│   ├── QueueProgress.tsx    ← [جدید] نمایش پیشرفت صف
-│   └── CandidateCard.tsx    ← [جدید] کارت نمایش کاندیدا
-│
-└── hooks/
-    └── useAnalysisQueue.ts  ← [جدید] مدیریت صف پردازش AI
-```
-
-فایل‌های موجود که ویرایش می‌شوند:
-```
-src/
-├── db.ts                    ← اضافه کردن جداول candidates و analysisQueue
-├── App.tsx                  ← اضافه کردن route‌های جدید
-└── pages/Home.tsx           ← لینک به صفحه ProjectPages
-```
-
----
-
-## منطق الگوریتم امتیازدهی (`scorer.ts`) — تغییرات
-
-تابع جدید برای برگرداندن تگ‌های مشترک:
-
-```ts
-// تابع جدید
-function getMatchedTags(catA, catB): string[] {
-  const matched: string[] = [];
-  Object.keys(catA).forEach((field) => {
-    if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
-      matched.push(field);
-    }
-  });
-  return matched;
-}
-
-// تغییر در findTopCandidates — اضافه کردن matched_tags به خروجی
-interface CandidateWithTags {
-  page_id: number;
-  title: string;
-  score: number;
-  matched_tags: string[]; // فیلد جدید
-}
-```
-
----
-
-## ساختار Prompt برای Gemini — تغییرات
-
-### Prompt برای یک صفحه (دکمه تکی):
-
-```
-SYSTEM:
-تو یک متخصص SEO هستی. وظیفه‌ات انتخاب بهترین لینک‌های داخلی است.
-
-USER:
-یک صفحه از سایت نهال‌گشت و ۲۰ صفحه کاندیدا برای لینک‌سازی داده شده.
-از بین این ۲۰ کاندیدا، دقیقاً ۵ صفحه برتر را انتخاب کن.
-
-معیار: شباهت معنایی، ارتباط موضوعی، و تکمیل‌کنندگی سفر کاربر.
-
-صفحه اصلی:
-- عنوان: تور مارماریس تابستان ۱۴۰۵
-- ویژگی‌ها: کشور=ترکیه، فصل=تابستان، نوع=تفریحی
-
-کاندیداها:
-1. تور کوش آداسی تابستان — امتیاز تگ: 15 — تگ‌های مشترک: کشور، فصل
-2. تور آنتالیا بهار — امتیاز تگ: 10 — تگ‌های مشترک: کشور
-...
-
-خروجی را فقط به صورت JSON خالص بده:
-{
-  "selected_links": [
-    { "page_id": 42, "title": "...", "reason": "..." }
-  ]
-}
-```
 
 ---
 

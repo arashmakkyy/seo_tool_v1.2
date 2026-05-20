@@ -1,690 +1,605 @@
-# tasks.md — نقشه راه مرجع (سیستم جدید بررسی لینک‌ها)
+# tasks.md — نقشه راه مرجع (اصلاح الگوریتم لینک‌سازی)
 
 > ترتیب تسک‌ها اجباری است. هر تسک روی خروجی تسک قبلی تکیه دارد.
 > قبل از شروع هر تسک، فایل‌های CONTEXT_FILES را بخوان.
 
 ---
 
-## تسک ۱ — به‌روزرسانی اسکیمای دیتابیس
+## تسک ۱ — اضافه کردن ثابت‌های زمانی و فصلی
 
 ### هدف
-اضافه کردن دو جدول جدید به Dexie: `candidates` (برای ذخیره ۲۰ کاندیدای هر صفحه) و `analysisQueue` (برای مدیریت صف پردازش AI).
+اضافه کردن ثابت‌های لازم برای فیلتر زمانی/فصلی به فایل `categories.ts`.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/db.ts`**: نسخه دیتابیس را از 1 به 2 تغییر بده و دو جدول جدید اضافه کن:
+**فایل `src/constants/categories.ts`:**
 
-   ```ts
-   // جدول candidates — ۲۰ کاندیدای هر صفحه (قبل از AI)
-   export interface Candidate {
-     id?: number;
-     project_id: number;
-     source_page_id: number;
-     candidate_list: string; // JSON آرایه: [{ page_id, title, score, matched_tags }]
-     computed_at: string;
-   }
+در انتهای فایل، این موارد را اضافه کن:
 
-   // جدول analysisQueue — صف پردازش AI
-   export interface AnalysisQueue {
-     id?: number;
-     project_id: number;
-     status: 'pending' | 'processing' | 'completed' | 'failed' | 'paused';
-     current_page_index: number;
-     total_pages: number;
-     error_message: string | null;
-     started_at: string;
-     updated_at: string;
-   }
-   ```
+```ts
+// ترتیب ماه‌های شمسی برای مقایسه زمانی
+export const PERSIAN_MONTHS_ORDER = [
+  'فروردین', 'اردیبهشت', 'خرداد',
+  'تیر', 'مرداد', 'شهریور',
+  'مهر', 'آبان', 'آذر',
+  'دی', 'بهمن', 'اسفند'
+];
 
-2. اسکیمای Dexie را آپدیت کن:
-   ```ts
-   this.version(2).stores({
-     projects: '++id, name, created_at',
-     pages: '++id, project_id, title',
-     weights: '++id, project_id, category_name',
-     candidates: '++id, project_id, source_page_id',
-     results: '++id, project_id, source_page_id',
-     analysisQueue: '++id, project_id'
-   });
-   ```
+// نگاشت ماه به فصل
+export const MONTH_TO_SEASON: Record<string, string> = {
+  'فروردین': 'بهار',
+  'اردیبهشت': 'بهار',
+  'خرداد': 'بهار',
+  'تیر': 'تابستان',
+  'مرداد': 'تابستان',
+  'شهریور': 'تابستان',
+  'مهر': 'پاییز',
+  'آبان': 'پاییز',
+  'آذر': 'پاییز',
+  'دی': 'زمستان',
+  'بهمن': 'زمستان',
+  'اسفند': 'زمستان'
+};
 
-3. فیلد `is_manual_edit` را به interface `Result` اضافه کن.
+// بونوس‌های ثابت
+export const ORIGIN_BONUS = 10;      // بونوس مبدای یکسان
+export const DESTINATION_BONUS = 5;  // بونوس مقصد یکسان
+```
+
+همچنین وزن پیش‌فرض `شهر_یا_استان_مبدا` را به `6` تغییر بده (چون مبدا اولویت اول است).
 
 ### محدودیت‌های این تسک
-- ✅ فقط تغییرات schema — هیچ منطق بیزینسی جدید
-- ✅ از `upgrade()` برای migration استفاده نکن؛ این یک fresh install است
-- ⛔ هیچ کامپوننت UI تغییر نکند
+- ✅ فقط اضافه کردن ثابت‌ها — هیچ منطقی تغییر نکند
+- ✅ export کن تا در فایل‌های دیگر قابل استفاده باشند
+- ⛔ هیچ فایل دیگری تغییر نکند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts"]`
+`CONTEXT_FILES: ["src/constants/categories.ts"]`
 
 ---
 
-## تسک ۲ — آپدیت موتور امتیازدهی برای نمایش تگ‌های مشترک
+## تسک ۲ — بازنویسی کامل موتور امتیازدهی با منطق چندلایه
 
 ### هدف
-تغییر در `scorer.ts` برای برگرداندن لیست تگ‌های مشترک علاوه بر امتیاز. این اطلاعات به کاربر نشان داده می‌شود و به AI هم برای تحلیل بهتر ارسال می‌شود.
+بازنویسی فایل `scorer.ts` با منطق جدید که شامل فیلتر فصلی، بونوس مبدا/مقصد، و امتیازدهی چندلایه است.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/utils/scorer.ts`**:
+**فایل `src/utils/scorer.ts`:**
 
-   **تغییر در interface `Candidate`:**
-   ```ts
-   export interface CandidateWithTags {
-     page_id: number;
-     title: string;
-     score: number;
-     matched_tags: string[]; // فیلد جدید — نام تگ‌های مشترک
-   }
-   ```
+کل فایل را بازنویسی کن. ساختار جدید:
 
-   **اضافه کردن تابع جدید `getMatchedTags`:**
-   ```ts
-   // برگرداندن لیست تگ‌هایی که بین دو صفحه مشترک هستند
-   export function getMatchedTags(catA: CategoriesMap, catB: CategoriesMap): string[] {
-     const matched: string[] = [];
-     Object.keys(catA).forEach((field) => {
-       if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
-         matched.push(field);
-       }
-     });
-     return matched;
-   }
-   ```
+```ts
+import { PERSIAN_MONTHS_ORDER, MONTH_TO_SEASON, ORIGIN_BONUS, DESTINATION_BONUS } from '../constants/categories';
 
-   **تغییر در `findTopCandidates`:**
-   - خروجی را از `Candidate[]` به `CandidateWithTags[]` تغییر بده
-   - در map، علاوه بر score، فیلد `matched_tags` را هم با صدا زدن `getMatchedTags` پر کن
+// اینترفیس جدید با فیلدهای بونوس
+export interface CandidateWithTags {
+  page_id: number;
+  title: string;
+  score: number;
+  matched_tags: string[];
+  origin_bonus: number;      // فیلد جدید
+  destination_bonus: number; // فیلد جدید
+}
 
-   **تغییر در `computeAllCandidates`:**
-   - نوع خروجی Map را به `Map<number, CandidateWithTags[]>` تغییر بده
+/**
+ * تابع ۱: فیلتر Hard فصلی/زمانی
+ * 
+ * قانون: اگر صفحه منبع ماه خاصی دارد (مثلاً آبان)، کاندیدا باید:
+ *   - همان ماه باشد (آبان)
+ *   - یا ماه بعدی باشد (آذر)
+ *   - ماه‌های قبلی یا فصل‌های دیگر ❌ حذف می‌شوند
+ * 
+ * اگر صفحه منبع فصل دارد ولی ماه خاص ندارد، فقط همان فصل مجاز است.
+ * اگر صفحه منبع نه ماه دارد نه فصل (صفحه عمومی)، همه کاندیداها مجازند.
+ */
+export function isValidSeasonalMatch(sourceCategories: any, candidateCategories: any): boolean {
+  const sourceMonth = sourceCategories['ماه_تقویمی_برگزاری'];
+  const sourceSeason = sourceCategories['فصل_برگزاری'];
+  const candidateMonth = candidateCategories['ماه_تقویمی_برگزاری'];
+  const candidateSeason = candidateCategories['فصل_برگزاری'];
+  
+  // صفحه منبع عمومی است — همه مجاز
+  if (!sourceMonth && !sourceSeason) {
+    return true;
+  }
+  
+  // ۱. بررسی ماه
+  if (sourceMonth) {
+    const sourceIdx = PERSIAN_MONTHS_ORDER.indexOf(sourceMonth);
+    
+    // اگر کاندیدا ماه دارد
+    if (candidateMonth) {
+      const candidateIdx = PERSIAN_MONTHS_ORDER.indexOf(candidateMonth);
+      // ماه باید یکی باشد یا یکی بعد (با در نظر گرفتن چرخش سال)
+      const isCurrentMonth = candidateIdx === sourceIdx;
+      const isNextMonth = candidateIdx === (sourceIdx + 1) % 12;
+      
+      if (!isCurrentMonth && !isNextMonth) {
+        return false; // ماه نامعتبر — حذف
+      }
+    }
+    // اگر کاندیدا ماه ندارد ولی فصل دارد، فصلش باید با ماه منبع هم‌خوان باشد
+    else if (candidateSeason) {
+      const sourceSeasonFromMonth = MONTH_TO_SEASON[sourceMonth];
+      if (candidateSeason !== sourceSeasonFromMonth) {
+        return false; // فصل نامعتبر — حذف
+      }
+    }
+    // کاندیدا نه ماه دارد نه فصل — صفحه عمومی، مجاز است
+  }
+  
+  // ۲. بررسی فصل (اگر منبع فقط فصل دارد بدون ماه خاص)
+  else if (sourceSeason) {
+    if (candidateSeason && candidateSeason !== sourceSeason) {
+      return false; // فصل متفاوت — حذف
+    }
+    // اگر کاندیدا ماه دارد، بررسی کن ماهش با فصل منبع هم‌خوان باشد
+    if (candidateMonth) {
+      const candidateSeasonFromMonth = MONTH_TO_SEASON[candidateMonth];
+      if (candidateSeasonFromMonth !== sourceSeason) {
+        return false;
+      }
+    }
+  }
+  
+  return true; // فیلتر پاس شد
+}
 
-2. مطمئن شو که توابع موجود به درستی کار می‌کنند و هیچ چیز خراب نشود.
+/**
+ * تابع ۲: محاسبه بونوس مبدا و مقصد
+ * 
+ * قانون اولویت:
+ *   ۱. مبدا یکسان = بونوس ۱۰ (اولویت اول)
+ *   ۲. مقصد یکسان = بونوس ۵ (اولویت دوم)
+ */
+export function calculateBonuses(sourceCategories: any, candidateCategories: any): { originBonus: number; destinationBonus: number } {
+  let originBonus = 0;
+  let destinationBonus = 0;
+  
+  // بونوس مبدا
+  const sourceOrigin = sourceCategories['شهر_یا_استان_مبدا'];
+  const candidateOrigin = candidateCategories['شهر_یا_استان_مبدا'];
+  if (sourceOrigin && candidateOrigin && sourceOrigin === candidateOrigin) {
+    originBonus = ORIGIN_BONUS;
+  }
+  
+  // بونوس مقصد
+  const sourceDestination = sourceCategories['شهر_یا_جزیره_مقصد'];
+  const candidateDestination = candidateCategories['شهر_یا_جزیره_مقصد'];
+  if (sourceDestination && candidateDestination && sourceDestination === candidateDestination) {
+    destinationBonus = DESTINATION_BONUS;
+  }
+  
+  return { originBonus, destinationBonus };
+}
+
+/**
+ * تابع ۳: محاسبه تگ‌های مشترک (بدون تغییر)
+ */
+export function getMatchedTags(catA: any, catB: any): string[] {
+  const matched: string[] = [];
+  Object.keys(catA).forEach((field) => {
+    if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
+      matched.push(field);
+    }
+  });
+  return matched;
+}
+
+/**
+ * تابع ۴: محاسبه امتیاز پایه (وزن تگ‌های مشترک)
+ */
+export function computeBaseScore(catA: any, catB: any, weights: Record<string, number>, mode: 'linear' | 'weighted'): number {
+  let score = 0;
+  
+  for (const field in catA) {
+    if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
+      if (mode === 'linear') {
+        score += 1;
+      } else {
+        score += (weights[field] ?? 1);
+      }
+    }
+  }
+  
+  return score;
+}
+
+/**
+ * تابع ۵: پیدا کردن کاندیداها با منطق چندلایه
+ * 
+ * لایه ۱: فیلتر Hard فصلی/زمانی → حذف صفحات نامعتبر
+ * لایه ۲: امتیاز پایه → وزن تگ‌های مشترک
+ * لایه ۳: بونوس‌ها → مبدا و مقصد
+ * لایه ۴: مرتب‌سازی → بر اساس امتیاز کل (جمع، نه میانگین!)
+ */
+export function findTopCandidates(
+  sourcePage: any, 
+  allPages: any[], 
+  weights: Record<string, number>, 
+  mode: 'linear' | 'weighted'
+): CandidateWithTags[] {
+  const sourceCat = JSON.parse(sourcePage.categories);
+  
+  const candidates: CandidateWithTags[] = [];
+  
+  for (const page of allPages) {
+    // اسکیپ خود صفحه
+    if (page.id === sourcePage.id) continue;
+    
+    const pageCat = JSON.parse(page.categories);
+    
+    // ────────────────────────────────────────
+    // لایه ۱: فیلتر Hard فصلی/زمانی
+    // ────────────────────────────────────────
+    if (!isValidSeasonalMatch(sourceCat, pageCat)) {
+      continue; // حذف کامل — به لیست نهایی نمی‌رود
+    }
+    
+    // ────────────────────────────────────────
+    // لایه ۲: امتیاز پایه
+    // ────────────────────────────────────────
+    const baseScore = computeBaseScore(sourceCat, pageCat, weights, mode);
+    
+    // ────────────────────────────────────────
+    // لایه ۳: بونوس مبدا/مقصد
+    // ────────────────────────────────────────
+    const { originBonus, destinationBonus } = calculateBonuses(sourceCat, pageCat);
+    
+    // ────────────────────────────────────────
+    // امتیاز نهایی = جمع (نه میانگین!)
+    // ────────────────────────────────────────
+    const totalScore = baseScore + originBonus + destinationBonus;
+    
+    // فقط صفحاتی که حداقل ۱ تطابق دارند
+    if (totalScore > 0) {
+      candidates.push({
+        page_id: page.id!,
+        title: page.title,
+        score: totalScore,
+        matched_tags: getMatchedTags(sourceCat, pageCat),
+        origin_bonus: originBonus,
+        destination_bonus: destinationBonus
+      });
+    }
+  }
+  
+  // ────────────────────────────────────────
+  // لایه ۴: مرتب‌سازی نهایی
+  // ────────────────────────────────────────
+  candidates.sort((a, b) => b.score - a.score);
+  
+  return candidates;
+}
+
+/**
+ * تابع ۶: محاسبه کاندیداها برای همه صفحات (بدون تغییر در امضا)
+ */
+export function computeAllCandidates(
+  pages: any[], 
+  weights: Record<string, number>, 
+  mode: 'linear' | 'weighted'
+): Map<number, CandidateWithTags[]> {
+  const map = new Map<number, CandidateWithTags[]>();
+  
+  for (const page of pages) {
+    const candidates = findTopCandidates(page, pages, weights, mode);
+    map.set(page.id!, candidates);
+  }
+  
+  return map;
+}
+```
 
 ### محدودیت‌های این تسک
-- ✅ توابع قبلی باید همچنان کار کنند (backward compatible)
-- ✅ `matched_tags` باید نام فارسی فیلدها باشد (مثلاً `"کشور_مقصد"`)
-- ⛔ هیچ side effect نباشد
-- ⛔ هیچ import جدید لازم نیست
+- ✅ تمام توابع قبلی باید همچنان export شوند
+- ✅ فیلتر فصلی باید **قبل** از محاسبه امتیاز انجام شود
+- ✅ امتیاز نهایی = جمع (نه میانگین)
+- ⛔ هیچ import جدیدی غیر از `categories.ts` اضافه نشود
+- ⛔ تابع `computeAllCandidates` نباید امضایش تغییر کند
 
 `CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/categories.ts"]`
 
 ---
 
-## تسک ۳ — ساخت تابع ذخیره‌سازی کاندیداها و Route جدید
+## تسک ۳ — پیاده‌سازی Reactivity تنظیمات در Config
 
 ### هدف
-ساختن یک تابع که امتیازدهی الگوریتمی را اجرا کند و نتایج را در جدول `candidates` ذخیره کند. همچنین اضافه کردن route‌های جدید به App.tsx.
+وقتی کاربر در صفحه Config تنظیمات را تغییر می‌دهد (مثلاً از `linear` به `weighted`)، سیستم باید جدول `candidates` را پاک کند تا در ورود بعدی به `ProjectPages` مجدداً محاسبه شود.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/utils/candidateStorage.ts`** (فایل جدید):
-   ```ts
-   // این تابع برای یک پروژه:
-   // 1. تمام pages را بخوان
-   // 2. computeAllCandidates را صدا بزن
-   // 3. نتایج را در جدول candidates ذخیره کن
-   
-   export async function computeAndStoreCandidates(
-     projectId: number,
-     pages: Page[],
-     weights: Record<string, number>,
-     mode: 'linear' | 'weighted'
-   ): Promise<void> {
-     // کاندیداهای قبلی این پروژه را پاک کن
-     await db.candidates.where('project_id').equals(projectId).delete();
-     
-     // محاسبه کاندیداها
-     const candidatesMap = computeAllCandidates(pages, weights, mode);
-     
-     // آماده‌سازی برای bulk insert
-     const now = new Date().toISOString();
-     const records = Array.from(candidatesMap.entries()).map(([pageId, list]) => ({
-       project_id: projectId,
-       source_page_id: pageId,
-       candidate_list: JSON.stringify(list),
-       computed_at: now
-     }));
-     
-     // ذخیره یکجا
-     await db.candidates.bulkAdd(records);
-   }
-   ```
+**فایل `src/pages/Config.tsx`:**
 
-2. **`src/App.tsx`**: دو route جدید اضافه کن:
-   ```tsx
-   <Route path="/project/:projectId" element={<ProjectPages />} />
-   <Route path="/project/:projectId/page/:pageId" element={<PageDetail />} />
-   ```
-   فعلاً برای کامپوننت‌ها placeholder بگذار (یک div ساده).
+در تابع `handleStartAnalysis`، **قبل از** navigate، کاندیداهای قبلی را پاک کن:
 
-3. **`src/pages/ProjectPages.tsx`** (فایل جدید — placeholder):
-   ```tsx
-   export default function ProjectPages() {
-     return <div>صفحه لیست صفحات پروژه — در تسک بعدی ساخته می‌شود</div>;
-   }
-   ```
+```ts
+const handleStartAnalysis = async () => {
+  if (!apiKey) {
+    alert('لطفاً کلید API Gemini را وارد کنید');
+    return;
+  }
+  if (!projectId) return;
 
-4. **`src/pages/PageDetail.tsx`** (فایل جدید — placeholder):
-   ```tsx
-   export default function PageDetail() {
-     return <div>صفحه جزئیات — در تسک بعدی ساخته می‌شود</div>;
-   }
-   ```
+  setSaving(true);
+  try {
+    const id = parseInt(projectId);
+    
+    // ۱. ذخیره تنظیمات پروژه
+    await db.projects.update(id, { scoring_mode: scoringMode, max_links: maxLinks });
+
+    // ۲. ذخیره وزن‌ها
+    const weightsToSave = Object.entries(localWeights).map(([name, val]) => ({
+      project_id: id,
+      category_name: name,
+      weight_value: Number(val)
+    }));
+    await db.weights.where('project_id').equals(id).delete();
+    await db.weights.bulkAdd(weightsToSave);
+
+    // ────────────────────────────────────────
+    // ۳. [جدید] پاک کردن کاندیداها برای تریگر محاسبه مجدد
+    // ────────────────────────────────────────
+    await db.candidates.where('project_id').equals(id).delete();
+    
+    // ────────────────────────────────────────
+    // ۴. [جدید] ریست کردن صف پردازش (اگر قبلاً در حال پردازش بود)
+    // ────────────────────────────────────────
+    await db.analysisQueue.where('project_id').equals(id).delete();
+
+    navigate(`/project/${projectId}`);
+  } catch (err) {
+    console.error(err);
+    alert('خطا در ذخیره تنظیمات');
+  } finally {
+    setSaving(false);
+  }
+};
+```
+
+**نکته مهم:** با این تغییر، وقتی کاربر به `ProjectPages` می‌رود، `useEffect` موجود که `candidatesCount === 0` را چک می‌کند، خودکار محاسبه مجدد را تریگر می‌کند.
 
 ### محدودیت‌های این تسک
-- ✅ تابع `computeAndStoreCandidates` باید transaction-safe باشد
-- ✅ قبل از insert، رکوردهای قبلی پاک شوند
-- ⛔ هنوز UI نمایش کاندیداها ساخته نشود
+- ✅ کاندیداها باید **قبل از** navigate پاک شوند
+- ✅ صف پردازش هم ریست شود
+- ⛔ UI صفحه Config تغییر نکند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/utils/scorer.ts", "src/App.tsx"]`
+`CONTEXT_FILES: ["src/pages/Config.tsx", "src/db.ts"]`
 
 ---
 
-## تسک ۴ — صفحه لیست صفحات پروژه (ProjectPages)
+## تسک ۴ — بهبود پرامپت AI با درک نیت کاربر
 
 ### هدف
-ساختن صفحه‌ای که تمام صفحات یک پروژه را نشان می‌دهد. هر صفحه قابل کلیک است. دکمه «تحلیل هوشمند همه صفحات» در بالا قرار دارد.
-
-### یوزر فلو
-1. کاربر از صفحه Home روی پروژه کلیک می‌کند و به این صفحه می‌رسد
-2. می‌بیند: لیست تمام صفحات، وضعیت هر صفحه (تحلیل‌شده/نشده)، دکمه تحلیل کلی
-3. می‌تواند روی هر صفحه کلیک کند تا به PageDetail برود
-4. می‌تواند دکمه «تحلیل هوشمند همه صفحات» را بزند
+بازنویسی تابع `buildSinglePagePrompt` در `queueProcessor.ts` با پرامپت جدید که نیت کاربر را درک می‌کند.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/pages/ProjectPages.tsx`**:
-   
-   **Header:**
-   - نام پروژه
-   - دکمه «تحلیل هوشمند همه صفحات» (با آیکون Brain یا Sparkles)
-   - دکمه «مشاهده نتایج نهایی» (لینک به Results)
-   - دکمه «تنظیمات» (لینک به Config)
+**فایل `src/utils/queueProcessor.ts`:**
 
-   **بخش وضعیت:**
-   - اگر `analysisQueue` برای این پروژه وجود دارد و status=processing:
-     - نمایش نوار پیشرفت: `current_page_index / total_pages`
-     - دکمه «توقف موقت»
-   - اگر status=paused:
-     - نمایش «پردازش متوقف شده» + دکمه «ادامه»
-   - اگر status=failed:
-     - نمایش پیام خطا + دکمه «تلاش مجدد از ادامه»
+تابع `buildSinglePagePrompt` را کاملاً جایگزین کن:
 
-   **لیست صفحات:**
-   - یک جدول یا گرید از کارت‌ها
-   - هر آیتم: عنوان صفحه، تعداد کاندیدا، وضعیت (آیکون چک اگر result دارد)
-   - کلیک روی هر آیتم: navigate به `/project/:projectId/page/:pageId`
+```ts
+export function buildSinglePagePrompt(
+  sourcePage: { title: string; categories: object },
+  candidates: CandidateWithTags[]
+): string {
+  return `
+تو یک متخصص SEO و معمار لینک‌سازی داخلی برای سایت تور مسافرتی «نهال‌گشت» هستی.
 
-   **جستجو:**
-   - یک input برای فیلتر کردن صفحات بر اساس عنوان
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 مهم‌ترین وظیفه تو: درک نیت کاربر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-2. **داده‌خوانی:**
-   ```ts
-   const pages = useLiveQuery(() => db.pages.where('project_id').equals(projectId).toArray());
-   const results = useLiveQuery(() => db.results.where('project_id').equals(projectId).toArray());
-   const queue = useLiveQuery(() => db.analysisQueue.where('project_id').equals(projectId).first());
-   ```
+قبل از انتخاب لینک‌ها، باید به این سوالات پاسخ دهی:
 
-3. **منطق دکمه «تحلیل هوشمند همه صفحات»:**
-   - اگر queue وجود ندارد یا status=completed/failed: یک queue جدید بساز و navigate به حالت پردازش
-   - این دکمه فقط queue را می‌سازد — پردازش واقعی در تسک بعدی پیاده می‌شود
+۱. **چه کسی** به این صفحه می‌آید؟
+   - کاربری که دنبال تور ${sourcePage.title} است
+
+۲. **چه زمانی** می‌خواهد سفر کند؟
+   - به تگ «ماه_تقویمی_برگزاری» و «فصل_برگزاری» نگاه کن
+   - اگر صفحه مثلاً مال تیرماه است، کاربر برای تابستان برنامه دارد
+   - پس فقط صفحات همان بازه زمانی مرتبط هستند
+
+۳. **دغدغه اصلی** کاربر چیست؟
+   - آیا دنبال مقصد خاص است؟ → صفحات همان مقصد
+   - آیا از شهر خاصی می‌خواهد برود؟ → صفحات همان مبدا (اولویت بالاتر!)
+   - آیا نوع خاصی از تور می‌خواهد؟ → صفحات همان نوع
+
+۴. **سفر کاربر در سایت** چگونه تکمیل می‌شود؟
+   - صفحاتی که اطلاعات **مکمل** (نه تکراری) ارائه می‌دهند
+   - مثلاً: تور قشم → تور کیش (مقصد مشابه در همان فصل)
+   - مثلاً: تور آنتالیا تابستان → تور مارماریس تابستان (کشور و فصل مشترک)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 قوانین انتخاب لینک
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+۱. **قانون زمانی (مهم!):**
+   - صفحات با فصل متفاوت را انتخاب نکن
+   - مثال: اگر صفحه منبع «تور قشم آبان» است، «تور قشم نوروز» انتخاب نشود!
+
+۲. **قانون مبدا (اولویت اول):**
+   - صفحات با مبدای یکسان بالاترین ارتباط را دارند
+   - به فیلد «origin_bonus» نگاه کن — اگر ۱۰ است یعنی مبدا یکسان است
+
+۳. **قانون مقصد (اولویت دوم):**
+   - صفحات با مقصد یکسان ارتباط بالایی دارند
+   - به فیلد «destination_bonus» نگاه کن — اگر ۵ است یعنی مقصد یکسان است
+
+۴. **قانون تکمیل‌کنندگی:**
+   - صفحاتی که «گزینه‌های جایگزین» ارائه می‌دهند، نه تکرار همان صفحه
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📄 صفحه اصلی (Source Page)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+عنوان: ${sourcePage.title}
+اطلاعات طبقه‌بندی: ${JSON.stringify(sourcePage.categories, null, 2)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 کاندیداها (پیش‌فیلتر شده بر اساس زمان)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${candidates.map((c, i) => `
+${i + 1}. [ID: ${c.page_id}] ${c.title}
+   📊 امتیاز کل: ${c.score}
+   🏠 بونوس مبدا: ${c.origin_bonus > 0 ? `✅ ${c.origin_bonus}` : '—'}
+   🎯 بونوس مقصد: ${c.destination_bonus > 0 ? `✅ ${c.destination_bonus}` : '—'}
+   🏷️ تگ‌های مشترک: ${c.matched_tags.join(' | ')}
+`).join('\n')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📤 فرمت خروجی
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+خروجی را **فقط** به صورت JSON خالص برگردان (بدون markdown، بدون توضیح اضافی):
+
+{
+  "user_intent": "توضیح کوتاه: کاربر این صفحه چه می‌خواهد؟",
+  "selected_links": [
+    { 
+      "page_id": 42, 
+      "title": "عنوان صفحه", 
+      "reason": "دلیل انتخاب از نظر SEO و نیت کاربر"
+    }
+  ]
+}
+
+نکته: تعداد لینک‌ها محدودیت ندارد. فقط صفحات **واقعاً مرتبط** را انتخاب کن.
+`;
+}
+```
 
 ### محدودیت‌های این تسک
-- ✅ از `useLiveQuery` برای reactive data استفاده کن
-- ✅ UI باید responsive باشد (موبایل و دسکتاپ)
-- ⛔ پردازش واقعی AI در این تسک پیاده نمی‌شود — فقط UI
-- ⛔ دکمه تحلیل کلی فقط queue بسازد، نه اجرا
+- ✅ پرامپت باید فارسی و واضح باشد
+- ✅ فیلدهای `origin_bonus` و `destination_bonus` را نمایش بده
+- ✅ خروجی JSON باید شامل `user_intent` باشد
+- ⛔ ساختار خروجی JSON تغییر نکند (برای backward compatibility)
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/hooks/useProject.ts", "src/pages/Home.tsx", "src/components/ui/Button.tsx"]`
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/queueProcessor.ts", "src/utils/scorer.ts"]`
 
 ---
 
-## تسک ۵ — صفحه جزئیات صفحه (PageDetail)
+## تسک ۵ — آپدیت کامپوننت CandidateCard برای نمایش بونوس‌ها
 
 ### هدف
-ساختن صفحه‌ای که جزئیات یک صفحه خاص را نشان می‌دهد: اطلاعات صفحه، ۲۰ کاندیدا، لینک‌های انتخاب‌شده، و امکان ویرایش دستی.
-
-### یوزر فلو
-1. کاربر از ProjectPages روی یک صفحه کلیک می‌کند
-2. می‌بیند: اطلاعات صفحه، لیست ۲۰ کاندیدا، لینک‌های پیشنهادی AI (اگر وجود دارد)
-3. می‌تواند دکمه «بررسی با هوش مصنوعی» را بزند (فقط این صفحه)
-4. می‌تواند لینک‌ها را دستی ویرایش کند: اضافه، حذف، تغییر اولویت
+نمایش بونوس مبدا و مقصد در کارت‌های کاندیدا در صفحه `PageDetail`.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/pages/PageDetail.tsx`**:
+**فایل `src/components/CandidateCard.tsx`:**
 
-   **Header:**
-   - breadcrumb: نام پروژه > نام صفحه
-   - دکمه «برگشت به لیست»
-   - دکمه «بررسی با هوش مصنوعی» (فقط این صفحه)
+اینترفیس props را آپدیت کن:
 
-   **بخش اطلاعات صفحه:**
-   - عنوان صفحه (H1)
-   - جدول تگ‌ها: نمایش ۱۸ فیلد دسته‌بندی که مقدار غیرnull دارند
-   - نمایش زیبا با Badge برای هر تگ
+```ts
+interface CandidateCardProps {
+  title: string;
+  score: number;
+  matchedTags: string[];
+  originBonus?: number;      // فیلد جدید
+  destinationBonus?: number; // فیلد جدید
+  isSelected?: boolean;
+  onSelect?: () => void;
+}
+```
 
-   **بخش کاندیداها (۲۰ صفحه مشابه):**
-   - عنوان: «صفحات مشابه (امتیازدهی الگوریتمی)»
-   - لیست ۲۰ کاندیدا از جدول `candidates`
-   - هر آیتم: عنوان، امتیاز، تگ‌های مشترک (به شکل Badge)
-   - **قابلیت انتخاب دستی:** چک‌باکس کنار هر کاندیدا برای اضافه کردن به لینک‌های نهایی
+در بدنه کامپوننت، بعد از نمایش امتیاز، بونوس‌ها را نشان بده:
 
-   **بخش لینک‌های پیشنهادی (نتیجه AI یا دستی):**
-   - عنوان: «لینک‌های انتخاب‌شده»
-   - اگر result برای این صفحه وجود دارد: نمایش لینک‌ها با reason
-   - اگر نه: «هنوز تحلیل نشده»
-   - **قابلیت ویرایش:**
-     - drag & drop برای تغییر اولویت
-     - دکمه حذف برای هر لینک
-     - اضافه کردن از لیست کاندیداها با چک‌باکس
-   - دکمه «ذخیره تغییرات» که `is_manual_edit: true` ست می‌کند
+```tsx
+{/* نمایش بونوس‌ها */}
+<div className="flex gap-2 mt-2">
+  {originBonus > 0 && (
+    <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full font-bold">
+      🏠 مبدا یکسان (+{originBonus})
+    </span>
+  )}
+  {destinationBonus > 0 && (
+    <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded-full font-bold">
+      🎯 مقصد یکسان (+{destinationBonus})
+    </span>
+  )}
+</div>
+```
 
-2. **داده‌خوانی:**
-   ```ts
-   const page = useLiveQuery(() => db.pages.get(pageId));
-   const candidate = useLiveQuery(() => db.candidates.where('source_page_id').equals(pageId).first());
-   const result = useLiveQuery(() => db.results.where('source_page_id').equals(pageId).first());
-   ```
+**فایل `src/pages/PageDetail.tsx`:**
 
-3. **منطق دکمه «بررسی با هوش مصنوعی»:**
-   - این دکمه فقط این یک صفحه را بررسی می‌کند (نه کل پروژه)
-   - در تسک بعدی پیاده‌سازی می‌شود — فعلاً placeholder
+در جایی که `CandidateCard` رندر می‌شود، props جدید را پاس بده:
+
+```tsx
+<CandidateCard
+  title={candidate.title}
+  score={candidate.score}
+  matchedTags={candidate.matched_tags}
+  originBonus={candidate.origin_bonus}
+  destinationBonus={candidate.destination_bonus}
+  // ... سایر props
+/>
+```
 
 ### محدودیت‌های این تسک
-- ✅ ویرایش دستی باید `is_manual_edit: true` بگذارد
-- ✅ UI برای drag & drop می‌تواند ساده باشد (دکمه بالا/پایین کافی است)
-- ⛔ پردازش AI در این تسک پیاده نمی‌شود
-- ⛔ از کتابخانه drag & drop استفاده نکن — دستی پیاده کن
+- ✅ بونوس‌ها فقط وقتی > 0 هستند نمایش داده شوند
+- ✅ از آیکون‌های ساده استفاده کن (🏠 برای مبدا، 🎯 برای مقصد)
+- ⛔ ساختار کلی کارت تغییر نکند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/pages/ProjectPages.tsx", "src/components/ui/Badge.tsx", "src/components/ui/Button.tsx"]`
+`CONTEXT_FILES: ["src/components/CandidateCard.tsx", "src/pages/PageDetail.tsx"]`
 
 ---
 
-## تسک ۶ — پردازش AI تکی (یک صفحه)
+## تسک ۶ — تست و اطمینان از یکپارچگی
 
 ### هدف
-پیاده‌سازی منطق دکمه «بررسی با هوش مصنوعی» که فقط یک صفحه و ۲۰ کاندیدایش را به AI می‌فرستد.
+تست کامل سیستم برای اطمینان از اینکه تمام تغییرات به درستی کار می‌کنند.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/utils/gemini.ts`** — اضافه کردن تابع جدید:
+یک فایل تست ساده بساز: `src/utils/scorer.test.ts`
 
-   **تابع `buildSinglePagePrompt`:**
-   ```ts
-   export function buildSinglePagePrompt(
-     sourcePage: { title: string; categories: object },
-     candidates: CandidateWithTags[]
-   ): string {
-     // پرامپت مخصوص یک صفحه — بدون محدودیت تعداد
-     return `
-   SYSTEM:
-   تو یک متخصص SEO هستی. وظیفه‌ات انتخاب بهترین لینک‌های داخلی است.
+```ts
+import { isValidSeasonalMatch, calculateBonuses, findTopCandidates } from './scorer';
 
-   USER:
-   یک صفحه از سایت و ${candidates.length} صفحه کاندیدا برای لینک‌سازی داده شده.
-   از بین کاندیداها، **هر صفحه‌ای که واقعاً از نظر معنایی مرتبط است را انتخاب کن**.
-   تعداد مهم نیست — فقط کیفیت و ارتباط واقعی مهم است.
-   اگر همه ۲۰ کاندیدا مرتبط هستند، همه را انتخاب کن.
-   اگر فقط ۳ تا مرتبط هستند، فقط ۳ تا را انتخاب کن.
+// تست ۱: فیلتر فصلی
+console.log('--- تست فیلتر فصلی ---');
 
-   معیار: شباهت معنایی، ارتباط موضوعی، و تکمیل‌کنندگی سفر کاربر.
+const sourceAban = { 'ماه_تقویمی_برگزاری': 'آبان', 'فصل_برگزاری': 'پاییز' };
+const candidateAban = { 'ماه_تقویمی_برگزاری': 'آبان', 'فصل_برگزاری': 'پاییز' };
+const candidateAzar = { 'ماه_تقویمی_برگزاری': 'آذر', 'فصل_برگزاری': 'پاییز' };
+const candidateTir = { 'ماه_تقویمی_برگزاری': 'تیر', 'فصل_برگزاری': 'تابستان' };
+const candidateNorooz = { 'ماه_تقویمی_برگزاری': 'فروردین', 'فصل_برگزاری': 'بهار' };
 
-   صفحه اصلی:
-   - عنوان: ${sourcePage.title}
-   - ویژگی‌ها: ${JSON.stringify(sourcePage.categories)}
+console.log('آبان → آبان:', isValidSeasonalMatch(sourceAban, candidateAban)); // true
+console.log('آبان → آذر:', isValidSeasonalMatch(sourceAban, candidateAzar));  // true (ماه بعد)
+console.log('آبان → تیر:', isValidSeasonalMatch(sourceAban, candidateTir));   // false
+console.log('آبان → نوروز:', isValidSeasonalMatch(sourceAban, candidateNorooz)); // false
 
-   کاندیداها:
-   ${candidates.map((c, i) => `${i + 1}. ${c.title} — امتیاز: ${c.score} — تگ‌های مشترک: ${c.matched_tags.join(', ')}`).join('\n')}
+// تست ۲: بونوس مبدا/مقصد
+console.log('\n--- تست بونوس‌ها ---');
 
-   خروجی را فقط به صورت JSON خالص بده (بدون markdown):
-   {
-     "selected_links": [
-       { "page_id": 42, "title": "...", "reason": "..." }
-     ]
-   }
-     `;
-   }
-   ```
+const sourceWithOrigin = { 'شهر_یا_استان_مبدا': 'تهران', 'شهر_یا_جزیره_مقصد': 'کیش' };
+const candidateSameOrigin = { 'شهر_یا_استان_مبدا': 'تهران', 'شهر_یا_جزیره_مقصد': 'قشم' };
+const candidateSameDest = { 'شهر_یا_استان_مبدا': 'مشهد', 'شهر_یا_جزیره_مقصد': 'کیش' };
 
-2. **`src/pages/PageDetail.tsx`** — پیاده‌سازی دکمه AI:
-   ```ts
-   const handleAIAnalysis = async () => {
-     setLoading(true);
-     setError(null);
-     
-     try {
-       const apiKey = localStorage.getItem('LINKMESH_API_KEY');
-       if (!apiKey) throw new Error('کلید API وارد نشده است.');
-       
-       // گرفتن کاندیداها
-       const candidateRecord = await db.candidates.where('source_page_id').equals(pageId).first();
-       if (!candidateRecord) throw new Error('ابتدا امتیازدهی الگوریتمی انجام دهید.');
-       
-       const candidateList = JSON.parse(candidateRecord.candidate_list);
-       const categories = JSON.parse(page.categories);
-       
-       // ساخت پرامپت — بدون محدودیت تعداد
-       const prompt = buildSinglePagePrompt({ title: page.title, categories }, candidateList);
-       
-       // فراخوانی AI
-       const response = await callGemini(prompt, apiKey);
-       
-       // ذخیره نتیجه
-       await db.results.where('source_page_id').equals(pageId).delete();
-       await db.results.add({
-         project_id: projectId,
-         source_page_id: pageId,
-         recommended_links: JSON.stringify(response.selected_links),
-         is_manual_edit: false,
-         generated_at: new Date().toISOString()
-       });
-       
-     } catch (err) {
-       setError(err.message);
-     } finally {
-       setLoading(false);
-     }
-   };
-   ```
+console.log('مبدا یکسان:', calculateBonuses(sourceWithOrigin, candidateSameOrigin)); // { originBonus: 10, destinationBonus: 0 }
+console.log('مقصد یکسان:', calculateBonuses(sourceWithOrigin, candidateSameDest));   // { originBonus: 0, destinationBonus: 5 }
+
+console.log('\n✅ تست‌ها تمام شد');
+```
+
+**اجرا:**
+```bash
+npx ts-node src/utils/scorer.test.ts
+```
 
 ### محدودیت‌های این تسک
-- ✅ فقط یک صفحه + کاندیداهایش ارسال می‌شود
-- ✅ نتیجه بلافاصله در `results` ذخیره می‌شود
-- ✅ قبل از ذخیره، result قبلی این صفحه پاک شود
-- ⛔ اگر API Key نبود، پیام خطا نشان بده
+- ✅ فقط تست — هیچ کد production تغییر نکند
+- ✅ تست‌ها باید pass شوند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/gemini.ts", "src/pages/PageDetail.tsx", "src/db.ts"]`
+`CONTEXT_FILES: ["src/utils/scorer.ts", "src/constants/categories.ts"]`
 
 ---
 
-## تسک ۷ — سیستم صف پردازش AI (تحلیل کلی)
+## چک‌لیست نهایی
 
-### هدف
-پیاده‌سازی سیستم صفی که صفحات را یکی‌یکی به AI می‌فرستد، نتیجه هر کدام را فوراً ذخیره می‌کند، و در صورت قطع شدن، از همان جا ادامه می‌دهد.
-
-### قوانین حیاتی
-1. **هرگز همه صفحات یکجا ارسال نشوند** — فقط یک صفحه در هر call
-2. **ذخیره دانه‌به‌دانه** — بلافاصله بعد از دریافت جواب هر صفحه، در Dexie ذخیره شود
-3. **مکث بین درخواست‌ها** — ۲ ثانیه بین هر call (برای جلوگیری از rate limit)
-4. **قابلیت resume** — اگر وسط کار قطع شد، از آخرین index ادامه دهد
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/hooks/useAnalysisQueue.ts`** (فایل جدید):
-   ```ts
-   export function useAnalysisQueue(projectId: number) {
-     const queue = useLiveQuery(() => db.analysisQueue.where('project_id').equals(projectId).first());
-     
-     // شروع پردازش جدید
-     const startQueue = async (totalPages: number) => {
-       // پاک کردن queue قبلی
-       await db.analysisQueue.where('project_id').equals(projectId).delete();
-       
-       // ساخت queue جدید
-       await db.analysisQueue.add({
-         project_id: projectId,
-         status: 'pending',
-         current_page_index: 0,
-         total_pages: totalPages,
-         error_message: null,
-         started_at: new Date().toISOString(),
-         updated_at: new Date().toISOString()
-       });
-     };
-     
-     // ادامه پردازش متوقف‌شده
-     const resumeQueue = async () => { ... };
-     
-     // توقف موقت
-     const pauseQueue = async () => { ... };
-     
-     return { queue, startQueue, resumeQueue, pauseQueue };
-   }
-   ```
-
-2. **`src/utils/queueProcessor.ts`** (فایل جدید):
-   ```ts
-   export async function processQueue(projectId: number) {
-     const apiKey = localStorage.getItem('LINKMESH_API_KEY');
-     if (!apiKey) throw new Error('کلید API وارد نشده است.');
-     
-     const queue = await db.analysisQueue.where('project_id').equals(projectId).first();
-     if (!queue || queue.status === 'completed') return;
-     
-     // آپدیت status به processing
-     await db.analysisQueue.update(queue.id!, { status: 'processing' });
-     
-     const pages = await db.pages.where('project_id').equals(projectId).toArray();
-     const project = await db.projects.get(projectId);
-     
-     // شروع از current_page_index
-     for (let i = queue.current_page_index; i < pages.length; i++) {
-       // چک کردن آیا pause شده
-       const currentQueue = await db.analysisQueue.get(queue.id!);
-       if (currentQueue?.status === 'paused') break;
-       
-       const page = pages[i];
-       
-       try {
-         // گرفتن کاندیداها
-         const candidateRecord = await db.candidates.where('source_page_id').equals(page.id!).first();
-         if (!candidateRecord) continue;
-         
-         const candidateList = JSON.parse(candidateRecord.candidate_list);
-         const categories = JSON.parse(page.categories);
-         
-         // ساخت پرامپت — بدون محدودیت تعداد
-         const prompt = buildSinglePagePrompt({ title: page.title, categories }, candidateList);
-         
-         // فراخوانی AI
-         const response = await callGemini(prompt, apiKey);
-         
-         // ذخیره فوری
-         await db.transaction('rw', db.results, db.analysisQueue, async () => {
-           await db.results.where('source_page_id').equals(page.id!).delete();
-           await db.results.add({
-             project_id: projectId,
-             source_page_id: page.id!,
-             recommended_links: JSON.stringify(response.selected_links || []),
-             is_manual_edit: false,
-             generated_at: new Date().toISOString()
-           });
-           
-           // آپدیت index
-           await db.analysisQueue.update(queue.id!, {
-             current_page_index: i + 1,
-             updated_at: new Date().toISOString()
-           });
-         });
-         
-         // مکث ۲ ثانیه
-         await new Promise(resolve => setTimeout(resolve, 2000));
-         
-       } catch (err) {
-         // ذخیره خطا و توقف
-         await db.analysisQueue.update(queue.id!, {
-           status: 'failed',
-           error_message: err.message,
-           updated_at: new Date().toISOString()
-         });
-         throw err;
-       }
-     }
-     
-     // تکمیل موفق
-     await db.analysisQueue.update(queue.id!, {
-       status: 'completed',
-       updated_at: new Date().toISOString()
-     });
-   }
-   ```
-
-3. **`src/components/QueueProgress.tsx`** (فایل جدید):
-   - نوار پیشرفت visual
-   - نمایش: «صفحه ۱۵ از ۱۲۰ در حال پردازش...»
-   - دکمه‌های pause/resume/retry
-
-### محدودیت‌های این تسک
-- ✅ ذخیره بعد از هر صفحه — نه در انتها
-- ✅ مکث ۲ ثانیه بین هر call
-- ✅ از transaction برای ذخیره atomic استفاده کن
-- ⛔ هرگز بیش از یک صفحه در هر call نفرستی
-- ⛔ queue processor باید در یک useEffect اجرا شود، نه background worker
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/utils/gemini.ts", "src/pages/ProjectPages.tsx"]`
-
----
-
-## تسک ۸ — اتصال کامپوننت‌های UI به سیستم صف
-
-### هدف
-اتصال صفحه ProjectPages به سیستم صف: نمایش پیشرفت، دکمه‌های کنترل، و اجرای پردازش.
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/pages/ProjectPages.tsx`**:
-   
-   **اضافه کردن state و logic:**
-   ```ts
-   const { queue, startQueue, pauseQueue, resumeQueue } = useAnalysisQueue(projectId);
-   const [isProcessing, setIsProcessing] = useState(false);
-   
-   // اجرای پردازش
-   useEffect(() => {
-     if (queue?.status === 'pending' || queue?.status === 'processing') {
-       setIsProcessing(true);
-       processQueue(projectId)
-         .catch(console.error)
-         .finally(() => setIsProcessing(false));
-     }
-   }, [queue?.status]);
-   ```
-
-   **دکمه «تحلیل هوشمند همه صفحات»:**
-   ```tsx
-   <Button
-     onClick={async () => {
-       // اول امتیازدهی الگوریتمی
-       await computeAndStoreCandidates(projectId, pages, weightsRecord, project.scoring_mode);
-       // شروع صف
-       await startQueue(pages.length);
-     }}
-     disabled={isProcessing}
-   >
-     {isProcessing ? 'در حال پردازش...' : 'تحلیل هوشمند همه صفحات'}
-   </Button>
-   ```
-
-   **بخش نمایش پیشرفت:**
-   ```tsx
-   {queue && queue.status !== 'completed' && (
-     <QueueProgress
-       current={queue.current_page_index}
-       total={queue.total_pages}
-       status={queue.status}
-       error={queue.error_message}
-       onPause={pauseQueue}
-       onResume={resumeQueue}
-     />
-   )}
-   ```
-
-2. **آپدیت کردن وضعیت هر صفحه در لیست:**
-   - اگر برای آن صفحه result وجود دارد: آیکون چک سبز
-   - اگر در حال پردازش است (index فعلی): آیکون spinner
-   - اگر هنوز نشده: بدون آیکون
-
-### محدودیت‌های این تسک
-- ✅ پردازش در useEffect باشد
-- ✅ UI باید real-time آپدیت شود (با useLiveQuery)
-- ⛔ پردازش نباید صفحه را block کند
-- ⛔ اگر کاربر صفحه را ببندد و برگردد، باید وضعیت درست نمایش داده شود
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/ProjectPages.tsx", "src/hooks/useAnalysisQueue.ts", "src/utils/queueProcessor.ts", "src/components/QueueProgress.tsx"]`
-
----
-
-## تسک ۹ — آپدیت صفحات Home و Results
-
-### هدف
-آپدیت کردن صفحات موجود برای کار با سیستم جدید: تغییر لینک‌ها، نمایش وضعیت پردازش، و اطمینان از یکپارچگی UX.
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/pages/Home.tsx`**:
-   - تغییر دکمه «مشاهده نتایج»: ابتدا به `/project/:id` برود (لیست صفحات)
-   - اضافه کردن نمایش وضعیت پردازش اگر queue فعال است
-   - اضافه کردن لینک مستقیم به Results (خروجی نهایی)
-
-2. **`src/pages/Results.tsx`**:
-   - حذف منطق `?analyze=true` — تحلیل در صفحه جدید انجام می‌شود
-   - این صفحه فقط نمایش نتایج نهایی است
-   - اضافه کردن لینک برگشت به ProjectPages
-
-3. **`src/pages/Config.tsx`**:
-   - تغییر دکمه «شروع تحلیل»: به جای Results، به ProjectPages برود
-   - اضافه کردن دکمه «محاسبه کاندیداها» (اجرای امتیازدهی الگوریتمی)
-
-4. **`src/App.tsx` — Sidebar**:
-   - بررسی و اطمینان از درست بودن لینک‌ها
-
-### محدودیت‌های این تسک
-- ✅ UX باید روان و قابل فهم باشد
-- ✅ کاربر نباید گیج شود بین صفحات مختلف
-- ⛔ منطق پردازش AI از Results حذف شود
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/Home.tsx", "src/pages/Results.tsx", "src/pages/Config.tsx", "src/App.tsx"]`
-
----
-
-## تسک ۱۰ — تست نهایی و رفع باگ
-
-### هدف
-تست کامل سیستم جدید و اطمینان از عملکرد صحیح تمام قسمت‌ها.
-
-### چک‌لیست تست
-
-**فلوی اصلی:**
-- [ ] آپلود CSV و ساخت پروژه جدید
-- [ ] تنظیم وزن‌ها و ذخیره
-- [ ] محاسبه کاندیداها (امتیازدهی الگوریتمی)
-- [ ] مشاهده لیست صفحات و کاندیداهای هر کدام
-- [ ] تحلیل تکی یک صفحه با AI
-- [ ] تحلیل کلی همه صفحات با صف
-- [ ] توقف و ادامه دادن صف
-- [ ] ویرایش دستی لینک‌های یک صفحه
-- [ ] مشاهده نتایج نهایی
-- [ ] Export به CSV
-
-**سناریوهای edge-case:**
-- [ ] قطع شدن اینترنت وسط پردازش
-- [ ] تمام شدن توکن API وسط پردازش
-- [ ] پروژه بدون هیچ result
-- [ ] صفحه بدون هیچ کاندیدای مشابه (تمام تگ‌ها null)
-
-**عملکرد:**
-- [ ] پردازش ۱۰۰ صفحه بدون هنگ کردن UI
-- [ ] صف به درستی resume می‌شود
-
-### محدودیت‌های این تسک
-- ✅ تمام console.log‌های debug حذف شوند
-- ✅ تمام متن‌های UI فارسی باشند
-- ⛔ هیچ تغییر ساختاری جدید — فقط رفع باگ
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "Docks/ARCHITECTURE.md", "src/App.tsx"]`
-
----
-
-## خلاصه تغییرات نسبت به سیستم قبلی
-
-| قبلی | جدید |
-|---|---|
-| همه صفحات یکجا به AI | صفحه‌به‌صفحه با صف |
-| ذخیره در انتها | ذخیره دانه‌به‌دانه |
-| بدون قابلیت resume | از همان جا ادامه |
-| بدون ویرایش دستی | ویرایش دستی کامل |
-| یک صفحه Results | صفحه جزئیات هر صفحه |
-| بدون نمایش تگ مشترک | نمایش تگ‌های مشترک |
+- [ ] ثابت‌های زمانی به `categories.ts` اضافه شد
+- [ ] موتور امتیازدهی با منطق چندلایه بازنویسی شد
+- [ ] تغییر تنظیمات در Config باعث پاک شدن کاندیداها می‌شود
+- [ ] پرامپت AI با درک نیت کاربر بهبود یافت
+- [ ] بونوس مبدا/مقصد در UI نمایش داده می‌شود
+- [ ] تست‌ها pass می‌شوند
