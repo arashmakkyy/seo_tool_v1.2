@@ -18,15 +18,16 @@
 
 | لایه | ابزار |
 |---|---|
-| فریم‌ورک UI | React 18 + Vite |
-| زبان | TypeScript |
-| استایل | Tailwind CSS v3 |
+| فریم‌ورک UI | React 19 + Vite 6 |
+| زبان | TypeScript 5.8 |
+| استایل | Tailwind CSS v4 |
 | فونت | Vazirmatn (Google Fonts) |
 | دیتابیس | Dexie.js v4 (wrapper روی IndexedDB مرورگر) |
 | پارس CSV | Papa Parse v5 |
-| هوش مصنوعی | Gemini API — مدل‌های `gemini-3.1-flash-lite` (پیش‌فرض) / `gemini-3-flash-preview` / `gemini-2.5-flash-lite` |
+| هوش مصنوعی | Gemini API — مدل‌های `gemini-3.1-flash-lite` / `gemini-3-flash-preview` / `gemini-2.5-flash-lite` |
+| انیمیشن | Motion (Framer Motion) |
 | مدیریت state | React useState + useContext (بدون کتابخانه خارجی) |
-| روتینگ | React Router v6 |
+| روتینگ | React Router v7 |
 | آیکون‌ها | Lucide React |
 
 ---
@@ -41,13 +42,61 @@
 | `sql.js` یا `@sqlite.org/sqlite-wasm` | Dexie.js کافی است و پیچیدگی WASM لازم نیست |
 | Redux، Zustand، MobX | از React useState/useContext استفاده کن |
 | Styled-components، CSS Modules، inline style | فقط Tailwind CSS کلاس مجاز است |
-| هر مدل Gemini غیر از `gemini-3-flash-preview` | برای کنترل هزینه — مدل ثابت است |
-| ذخیره API Key در Dexie یا کد | فقط `localStorage` برای API Key |
+| ذخیره API Key در Dexie یا کد | فقط در `localStorage` با کلید `LINKMESH_API_KEY` یا از طریق سرور |
 | ارسال همه صفحات یکجا به Gemini | پردازش صفحه‌به‌صفحه با صف و ذخیره دانه‌دانه الزامی است |
-| محدودیت تعداد لینک (max_links) | AI تمام لینک‌های مرتبط را انتخاب می‌کند — بدون محدودیت عددی |
 | `axios` | از fetch native مرورگر استفاده کن |
 | `moment.js` یا `date-fns` | از `new Date().toISOString()` استفاده کن |
 | کامنت‌گذاری به انگلیسی در کد | تمام کامنت‌ها فارسی باشند |
+| استفاده از `confirm()` مرورگر | مودال اختصاصی با تاییدیه مشخص الزامی است |
+| استفاده از پیام خطای inline که Layout Shift ایجاد کند | از سیستم Toast شناور استفاده کن |
+| استفاده از `tracking-widest` یا `font-black` روی متن فارسی | خوانایی فونت فارسی را خراب می‌کند |
+| انیمیشن‌های کُند (`duration-500`+) برای Container ها | حداکثر `duration-300` مجاز است |
+| رنگ‌های نامتناسب با برند (`emerald`، `amber` بی‌دلیل) | رنگ اصلی برند `blue-600` است |
+| اجرای خودکار عملیات سنگین بدون اجازه کاربر | همیشه دکمه صریح لازم است |
+| جستجوی لایو بدون Debounce | حداقل ۳۰۰ms debounce الزامی است |
+| کتابخانه‌های drag & drop خارجی | پیاده‌سازی ساده با دکمه بالا/پایین کافی است |
+| استفاده از آیکون `Zap` برای بستن مودال | فقط آیکون `X` مجاز است |
+| استفاده از آیکون `Trash2` برای deselect | از آیکون `X` استفاده کن |
+| استفاده از `any` در TypeScript | همیشه تایپ دقیق تعریف کن |
+
+---
+
+## قوانین UI/UX (بازنگری شده)
+
+### اصول کلی
+- تمام متن‌های UI فارسی هستند (به جز نام ابزار "LinkMesh" و اصطلاحات فنی ضروری)
+- جهت صفحه RTL است (`dir="rtl"`)
+- طراحی تمیز و حرفه‌ای با **رنگ اصلی `blue-600`**
+
+### سیستم رنگ یکپارچه
+| نقش | رنگ |
+|---|---|
+| Primary/Brand | `blue-600` |
+| Success | `green-600` |
+| Warning | `amber-500` |
+| Error | `red-600` |
+| Neutral Background | `gray-50` / `white` |
+| Neutral Text | `gray-900` / `gray-600` / `gray-400` |
+
+### Layout ها
+- تمام صفحات از `max-w-6xl mx-auto` استفاده می‌کنند (یکپارچگی)
+- شکستن صفحه: Flex/Grid با `gap` (بدون `margin` تنها)
+
+### کامپوننت‌های استاندارد
+- **Toast**: شناور، گوشه پایین-چپ، با Timeout خودکار
+- **Modal**: با Focus Trap، کلید Escape، Backdrop Blur
+- **Input**: با Label، Placeholder، Error State، Focus Ring
+- **Empty State**: با Illustration و Call-to-Action
+
+### تایپوگرافی فارسی
+- عناوین: `font-bold` (حداکثر وزن 700)
+- متن بدنه: `font-normal` یا `font-medium`
+- **ممنوع**: `tracking-widest`، `tracking-wide`، `font-black` روی متن فارسی
+
+### انیمیشن
+- ورود عناصر: `duration-200` تا `duration-300`
+- Hover: `duration-150`
+- **ممنوع**: `duration-500`+ برای عناصر اصلی
 
 ---
 
@@ -56,8 +105,9 @@
 ### فاز ۱ (این پروژه — در حال ساخت)
 - ورودی فقط از طریق آپلود دستی CSV
 - تحلیل AI روی متادیتای ۱۸ ستون دسته‌بندی
-- امتیازدهی درون‌برنامه‌ای بدون AI (پیدا کردن top 20 کاندیدا)
+- امتیازدهی درون‌برنامه‌ای با **سیستم امتیازدهی بهبود‌یافته (۱-۱۰)**
 - تحلیل AI دانه‌به‌دانه با صف و ذخیره‌سازی فوری
+- AI ورودی ۳۰ کاندیدا می‌گیرد و ۱۵ مرتبط‌ترین را انتخاب می‌کند
 - صفحه جزئیات هر صفحه با قابلیت ویرایش دستی
 - خروجی: export CSV / کپی به کلیپ‌بورد
 
@@ -65,12 +115,3 @@
 - کراولر خودکار برای استخراج تگ‌ها از سایت
 - چند کاربر / چند workspace
 - ذخیره‌سازی ابری
-
----
-
-## قوانین UI/UX
-
-- تمام متن‌های UI فارسی هستند
-- جهت صفحه RTL است (`dir="rtl"`)
-- هیچ عنصری انگلیسی به کاربر نشان داده نمی‌شود (به جز نام ابزار "LinkMesh")
-- طراحی تمیز و حرفه‌ای با رنگ اصلی emerald
